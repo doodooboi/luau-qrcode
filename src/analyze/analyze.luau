@@ -14,6 +14,14 @@ local constants = require('../constants')
 local common = require("../common")
 local lexer = require('./lexer')
 
+local modes = {
+	[constants.modes.numeric] = require("../modes/numerical"),
+	[constants.modes.byte] = require('../modes/byte'),
+	[constants.modes.alphanumeric] = require('../modes/alphanumerical')
+}
+
+type analysisResult = { mode: string, read: string, cost: number }
+
 -- Referenced from: Table J.1 — Exclusive subset byte values for QR code modes
 local exclusive_subsets = {
 	numeric = function(byte: number)
@@ -115,14 +123,13 @@ local function formatAnalysis(analysis)
 	return `Mode: {analysis.mode}, Read: {analysis.read}`
 end
 
-local DEBUGGING = true
+local DEBUGGING = false
 local function log(...)
 	if not DEBUGGING then return end
 
 	print(...)
 end
 
-type analysisResult = {mode: string, read: string}
 local function newAnalysis(masterRecord: {analysisResult}, oldResult: analysisResult, mode: string, read: string, _eof: number, run: number)
 	log(`-> Switching to {mode} mode. EOF: {_eof}`)
 	log(`-> Analysis run {run} ended.`)
@@ -133,6 +140,7 @@ local function newAnalysis(masterRecord: {analysisResult}, oldResult: analysisRe
 	local newAnalysis ={
 		mode = mode,
 		read = read,
+		cost = -1,
 	}
 
 	log(`-> [NEW]: {formatAnalysis(newAnalysis)}`)
@@ -140,15 +148,14 @@ local function newAnalysis(masterRecord: {analysisResult}, oldResult: analysisRe
 	return newAnalysis
 end
 
-
 -- Referenced from: J.2 Optimisation for QR code symbols
-return function(input: string, ver: number)
+local function analyze(input: string, ver: number): {analysisResult}
 	local charLexer = lexer.new(input)
-	
+
 	local initialAnalysis = selectInitialMode(charLexer, ver)
 	local currentAnalysis = initialAnalysis
 
-	local analyzed: {analysisResult} = {initialAnalysis}
+	local analyzed: { analysisResult } = { initialAnalysis }
 
 	log(`Initial Analysis: {formatAnalysis(initialAnalysis)}`)
 
@@ -156,21 +163,23 @@ return function(input: string, ver: number)
 	local maxr = #input + 10
 
 	while charLexer:eof() > 0 do
-		if r > maxr then return analyzed end
+		if r > maxr then
+			return analyzed
+		end
 		r += 1
 
 		log(`Analysis run {r} started. {formatAnalysis(currentAnalysis)}`)
 		-- everytime we read matching characters, but we don't meed the threshold
 		-- we still need to add them to the current analyis.read, so we keep track here
-		local read = ''
+		local read = ""
 
 		if currentAnalysis.mode == constants.modes.byte then
 			-- implement Kanji (b.1)
 
 			local peeked = charLexer:read(true):byte()
-			log(`-> Byte peeked: {peeked and string.char(peeked) or 'EOF'}({peeked})`)
-			
-			-- b.2 
+			log(`-> Byte peeked: {peeked and string.char(peeked) or "EOF"}({peeked})`)
+
+			-- b.2
 			if exclusive_subsets.alphanumeric(peeked) then
 				local alphanumericChars = charLexer:readMatching(exclusive_subsets.alphanumeric)
 				local alphanumericThreshold = getThreshold(ver, { 11, 15, 16 })
@@ -202,7 +211,7 @@ return function(input: string, ver: number)
 
 				local count = #numericChars
 				local peeked2 = charLexer:read(true):byte()
-				
+
 				-- b.3
 				if count >= numericThreshold and exclusive_subsets.byte(peeked2) then
 					currentAnalysis = newAnalysis(
@@ -213,11 +222,11 @@ return function(input: string, ver: number)
 						charLexer:eof(),
 						r
 					)
-					
+
 					continue
 				end
 
-				numericThreshold = getThreshold(ver, {6,7,8})
+				numericThreshold = getThreshold(ver, { 6, 7, 8 })
 
 				-- b.4
 				if count >= numericThreshold and exclusive_subsets.alphanumeric(peeked2) then
@@ -242,17 +251,11 @@ return function(input: string, ver: number)
 			end
 		elseif currentAnalysis.mode == constants.modes.alphanumeric then
 			local peeked = charLexer:read(true):byte()
-			log(`-> Alpha peeked: {peeked and string.char(peeked) or 'EOF'}({peeked})`)
+			log(`-> Alpha peeked: {peeked and string.char(peeked) or "EOF"}({peeked})`)
 
 			if exclusive_subsets.byte(peeked) then
-				currentAnalysis = newAnalysis(
-					analyzed,
-					currentAnalysis,
-					constants.modes.byte,
-					charLexer:read(),
-					charLexer:eof(),
-					r
-				)
+				currentAnalysis =
+					newAnalysis(analyzed, currentAnalysis, constants.modes.byte, charLexer:read(), charLexer:eof(), r)
 
 				continue
 			end
@@ -284,7 +287,7 @@ return function(input: string, ver: number)
 			local read2 = charLexer:read()
 			local byte = read2:byte()
 
-			log(`-> Numerical peeked: {byte and string.char(byte) or 'EOF'}({byte})`)
+			log(`-> Numerical peeked: {byte and string.char(byte) or "EOF"}({byte})`)
 
 			local byteSubset = exclusive_subsets.byte(byte)
 			local alphaSubset = not byteSubset and exclusive_subsets.alphanumeric(byte)
@@ -292,14 +295,7 @@ return function(input: string, ver: number)
 			if byteSubset or alphaSubset then
 				local m = if byteSubset then constants.modes.byte else constants.modes.alphanumeric
 
-				currentAnalysis = newAnalysis(
-					analyzed,
-					currentAnalysis,
-					m,
-					read2,
-					charLexer:eof(),
-					r
-				)
+				currentAnalysis = newAnalysis(analyzed, currentAnalysis, m, read2, charLexer:eof(), r)
 
 				continue
 			end
@@ -330,4 +326,44 @@ return function(input: string, ver: number)
 	end
 
 	return analyzed
+end
+
+return function(input: string): {analysisResult}
+	local collectedResults = {}
+	local resultCosts = {}
+
+	-- These versions change required thresholds during analysis
+	for trial, ver in ipairs({1, 10, 27}) do
+		local analyzed = analyze(input, ver)
+		local totalCost = 0
+		local switches = 0
+		
+		-- Calulate cost and mode switches of each result
+		for i, result: analysisResult in ipairs(analyzed) do
+			if not modes[result.mode] then
+				print(`Failed to analyze cost for {result.mode} mode!`)
+				continue
+			end
+
+			local cost = modes[result.mode].cost(result.read, ver, false)
+			result.cost = cost
+
+			totalCost += cost
+			switches += 1
+		end
+
+		table.insert(resultCosts, {
+			cost = totalCost,
+			switches = switches,
+			trial = trial
+		})
+
+		table.insert(collectedResults, analyzed)
+	end
+
+	table.sort(resultCosts, function(cost1, cost2)
+		return cost1.cost < cost2.cost
+	end)
+
+	return collectedResults[resultCosts[1].trial]
 end
