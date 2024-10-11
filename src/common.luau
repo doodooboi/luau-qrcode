@@ -56,11 +56,27 @@ function common.inRange(x: number, min: number, max: number, exclusive: boolean?
 	return x >= min and x <= max
 end
 
-function common.serializeTable(val, name, skipnewlines, depth)
+function common.dec2bin(int: number, bits: number): string
+	local bin = {}
+	while int > 0 do
+		table.insert(bin, 1, (int % 2))
+		int //= 2
+	end
+	 
+	-- Padding
+  for i = 1, bits - #bin do
+    table.insert(bin, 1, 0)
+  end
+    
+  return table.concat(bin)
+end
+
+
+function common.serializeTable(val, name: string?, skipnewlines: boolean?, depth: number?)
 	skipnewlines = skipnewlines or false
 	depth = depth or 0
 
-	local tmp = string.rep(" ", depth)
+	local tmp = string.rep(" ", depth :: number)
 
 	if name then
 		tmp = tmp .. name .. " = "
@@ -70,10 +86,10 @@ function common.serializeTable(val, name, skipnewlines, depth)
 		tmp = tmp .. "{" .. (not skipnewlines and "\n" or "")
 
 		for k, v in pairs(val) do
-			tmp = tmp .. common.serializeTable(v, k, skipnewlines, depth + 1) .. "," .. (not skipnewlines and "\n" or "")
+			tmp = tmp .. common.serializeTable(v, k, skipnewlines, (depth :: number) + 1) .. "," .. (not skipnewlines and "\n" or "")
 		end
 
-		tmp = tmp .. string.rep(" ", depth) .. "}"
+		tmp = tmp .. string.rep(" ", (depth :: number)) .. "}"
 	elseif type(val) == "number" then
 		tmp = tmp .. tostring(val)
 	elseif type(val) == "string" then
