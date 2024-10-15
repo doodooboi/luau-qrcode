@@ -10,17 +10,23 @@ Notes:
 		V27
 ]]
 
-local constants = require('../constants')
+local constants = require("../constants")
 local common = require("../common")
-local lexer = require('./lexer')
+local lexer = require("./lexer")
 
 local modes = {
 	[constants.modes.numeric] = require("../modes/numerical"),
-	[constants.modes.byte] = require('../modes/byte'),
-	[constants.modes.alphanumeric] = require('../modes/alphanumerical')
+	[constants.modes.byte] = require("../modes/byte"),
+	[constants.modes.alphanumeric] = require("../modes/alphanumerical"),
 }
 
-type analysisResult = { mode: string, read: string, cost: number }
+export type analysisResult = {
+	mode: string,
+	read: string,
+	cost: number,
+	_tmpCost: { micro: number, normal: number },
+	_excluded: { number },
+}
 
 -- Referenced from: Table J.1 — Exclusive subset byte values for QR code modes
 local exclusive_subsets = {
@@ -30,29 +36,35 @@ local exclusive_subsets = {
 
 	alphanumeric = function(byte: number)
 		-- Check for Space, $, %
-		return byte and (byte == 0x20
-			or byte == 0x24
-			or byte == 0x25
-			-- Check for *, + 
-			or byte == 0x2A
-			or byte == 0x2B
-			-- Check for -, ., /
-			or (byte >= 0x2D and byte <= 0x2F)
-			-- Check for :
-			or byte == 0x3A
-			-- Check for A to Z
-			or (byte >= 0x41 and byte <= 0x5A))
+		return byte
+			and (
+				byte == 0x20
+				or byte == 0x24
+				or byte == 0x25
+				-- Check for *, + 
+				or byte == 0x2A
+				or byte == 0x2B
+				-- Check for -, ., /
+				or (byte >= 0x2D and byte <= 0x2F)
+				-- Check for :
+				or byte == 0x3A
+				-- Check for A to Z
+				or (byte >= 0x41 and byte <= 0x5A)
+			)
 	end,
 
 	byte = function(byte: number)
 		-- Check if byte is in the allowed ranges
-		return byte and ((byte >= 0x00 and byte <= 0x1F)
-			or (byte >= 0x21 and byte <= 0x23)
-			or (byte >= 0x26 and byte <= 0x29)
-			or byte == 0x2C
-			or (byte >= 0x3B and byte <= 0x40)
-			or (byte >= 0x5B and byte <= 0x7F)
-			or (byte >= 0xA0 and byte <= 0xDF))
+		return byte
+			and (
+				(byte >= 0x00 and byte <= 0x1F)
+				or (byte >= 0x21 and byte <= 0x23)
+				or (byte >= 0x26 and byte <= 0x29)
+				or byte == 0x2C
+				or (byte >= 0x3B and byte <= 0x40)
+				or (byte >= 0x5B and byte <= 0x7F)
+				or (byte >= 0xA0 and byte <= 0xDF)
+			)
 	end,
 
 	kanji = function(byte: number)
@@ -84,18 +96,18 @@ local function selectInitialMode(lex: lexer.lexer, ver: number)
 	end
 
 	if exclusive_subsets.alphanumeric(initialByte) then
-		local alphanumericChars = initialChar..lex:readMatching(exclusive_subsets.alphanumeric)
+		local alphanumericChars = initialChar .. lex:readMatching(exclusive_subsets.alphanumeric)
 		local threshold = getThreshold(ver, { 6, 7, 8 })
 
 		if #alphanumericChars < threshold then
 			return { mode = constants.modes.byte, read = alphanumericChars }
 		else
-			return { mode = constants.modes.alphanumeric, read = alphanumericChars}
+			return { mode = constants.modes.alphanumeric, read = alphanumericChars }
 		end
 	end
 
 	if exclusive_subsets.numeric(initialByte) then
-		local numericChars = initialChar..lex:readMatching(exclusive_subsets.numeric)
+		local numericChars = initialChar .. lex:readMatching(exclusive_subsets.numeric)
 		local numericCount = #numericChars
 
 		-- Determine thresholds based on the version
@@ -125,22 +137,31 @@ end
 
 local DEBUGGING = false
 local function log(...)
-	if not DEBUGGING then return end
+	if not DEBUGGING then
+		return
+	end
 
 	print(...)
 end
 
-local function newAnalysis(masterRecord: {analysisResult}, oldResult: analysisResult, mode: string, read: string, _eof: number, run: number)
+local function newAnalysis(
+	masterRecord: { analysisResult },
+	oldResult: analysisResult,
+	mode: string,
+	read: string,
+	_eof: number,
+	run: number
+)
 	log(`-> Switching to {mode} mode. EOF: {_eof}`)
 	log(`-> Analysis run {run} ended.`)
 	log(`-> [OLD]: {formatAnalysis(oldResult)}`)
 
 	table.insert(masterRecord, oldResult)
 
-	local newAnalysis ={
+	local newAnalysis = {
 		mode = mode,
 		read = read,
-		cost = -1,
+		cost = { micro = -1, normal = -1 },
 	}
 
 	log(`-> [NEW]: {formatAnalysis(newAnalysis)}`)
@@ -149,7 +170,7 @@ local function newAnalysis(masterRecord: {analysisResult}, oldResult: analysisRe
 end
 
 -- Referenced from: J.2 Optimisation for QR code symbols
-local function analyze(input: string, ver: number): {analysisResult}
+local function QR_analyze(input: string, ver: number): { analysisResult }
 	local charLexer = lexer.new(input)
 
 	local initialAnalysis = selectInitialMode(charLexer, ver)
@@ -328,16 +349,43 @@ local function analyze(input: string, ver: number): {analysisResult}
 	return analyzed
 end
 
-return function(input: string): {analysisResult}
-	local collectedResults = {}
-	local resultCosts = {}
+local function getSmallestVersion(data, ecc: "L" | "M" | "Q" | "H", micro: boolean?): number?
+	local toSearch = if micro then constants.raw_data_capacity.MICRO else constants.raw_data_capacity.QR
+
+	local excluded
+	if micro then
+		if data.trial == 1 then
+			excluded = { 2, 3, 4 }
+		elseif data.trial == 2 then
+			excluded = {1, 3, 4}
+		end
+	end
+
+	for ver, verData in ipairs(toSearch) do
+		if excluded and table.find(excluded, ver) then
+			continue
+		end
+
+		verData = verData[ecc]
+
+		if data.cost <= verData.bits then
+			return ver
+		end
+	end
+
+	return
+end
+
+return function(input: string, ecc: "L" | "M" | "H" | "Q"): ({ analysisResult }, number, boolean)
+	local analysisResults = {}
+	local trialResults = { micro = {}, normal = {} }
 
 	-- These versions change required thresholds during analysis
-	for trial, ver in ipairs({1, 10, 27}) do
-		local analyzed = analyze(input, ver)
+	for trial, ver in ipairs({ 1, 10, 27 }) do
+		local analyzed = QR_analyze(input, ver)
 		local totalCost = 0
 		local switches = 0
-		
+
 		-- Calulate cost and mode switches of each result
 		for i, result: analysisResult in ipairs(analyzed) do
 			if not modes[result.mode] then
@@ -352,18 +400,33 @@ return function(input: string): {analysisResult}
 			switches += 1
 		end
 
-		table.insert(resultCosts, {
+		table.insert(trialResults.normal, {
 			cost = totalCost,
 			switches = switches,
-			trial = trial
+			trial = trial,
 		})
 
-		table.insert(collectedResults, analyzed)
+		table.insert(analysisResults, analyzed)
 	end
 
-	table.sort(resultCosts, function(cost1, cost2)
+	-- TODO: Micro analysis
+
+	-- sort to make smallest cost first index
+	table.sort(trialResults.micro, function(cost1, cost2)
 		return cost1.cost < cost2.cost
 	end)
 
-	return collectedResults[resultCosts[1].trial]
+	table.sort(trialResults.normal, function(cost1, cost2)
+		return cost1.cost < cost2.cost
+	end)
+
+	local smallest = {
+		micro = nil, --getSmallestVersion(trialResults.micro[1], ecc, true),
+		normal = getSmallestVersion(trialResults.normal[1], ecc, false),
+	}
+
+	local ver = smallest.micro or smallest.normal
+	local costMode = if smallest.micro then "micro" else "normal"
+
+	return analysisResults[trialResults[costMode][1].trial], ver, costMode == "micro"
 end
