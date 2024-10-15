@@ -48,6 +48,15 @@ function common.alignmentPattern()
 	return pattern
 end
 
+function common.getSize(ver: number, micro: boolean?)
+	if not micro then
+		return 21 + (ver - 1) * 4
+	else
+		return 11 + (ver - 1) * 2
+	end
+end
+
+
 function common.inRange(x: number, min: number, max: number, exclusive: boolean?)
 	if exclusive then
 		return x > min and x < max

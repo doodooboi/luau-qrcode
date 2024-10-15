@@ -4,6 +4,10 @@ local common = require("../common")
 local _m = constants.mode_indicators
 local mode_indicators = {
 	MICRO = {
+		[1] = {
+			str = '',
+			bits = 0,
+		},
 		[2] = {
 			str = common.dec2bin(_m.byte.M2, _m.length.M2),
 			bits = _m.length.M2,

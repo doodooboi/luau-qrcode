@@ -83,9 +83,9 @@ return {
 	cost = function(input: string, ver: number, micro: boolean)
 		local mode_ind = if micro then mode_indicators.MICRO[ver] else mode_indicators.QR
 		local char_ind_bits = if micro
-			then constants.char_count_indicator_bits.MICRO(ver, constants.modes.byte)
-			else constants.char_count_indicator_bits.QR(ver, constants.modes.byte)
-
+			then constants.char_count_indicator_bits.MICRO(ver, constants.modes.alphanumeric)
+			else constants.char_count_indicator_bits.QR(ver, constants.modes.alphanumeric)
+			
 		return cost(mode_ind.bits, char_ind_bits, #input)
 	end,
 
@@ -108,8 +108,8 @@ return {
 
 		local mode_ind = if micro then mode_indicators.MICRO[ver] else mode_indicators.QR
 		local char_ind_bits = if micro
-			then constants.char_count_indicator_bits.MICRO(ver, constants.modes.byte)
-			else constants.char_count_indicator_bits.QR(ver, constants.modes.byte)
+			then constants.char_count_indicator_bits.MICRO(ver, constants.modes.alphanumeric)
+			else constants.char_count_indicator_bits.QR(ver, constants.modes.alphanumeric)
 
 		return table.concat({
 			mode_ind.str,
