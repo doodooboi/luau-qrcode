@@ -15,6 +15,7 @@ local shaped = require("./shaped")
 local common = require("./common")
 local analyze = require("./analyze/analyze")
 local constants = require("./constants")
+local ecc = require('./ecc')
 
 local modes = {
 	[constants.modes.numeric] = require("./modes/numerical"),
@@ -25,16 +26,50 @@ local modes = {
 local function createBaseQR(ver: number, micro: boolean?)
 	local size = common.getSize(ver, micro)
 
-	local code = shaped.array(size, size, 0)
+	local matrix = shaped.array(size, size, 0)
 
-	shaped.merge(code, common.finderPattern(), 0, 0)
-	shaped.merge(code, common.finderPattern(), size - 7, 0)
-	shaped.merge(code, common.finderPattern(), 0, size - 7)
+	-- Timing patterns
+	local timing_row = 7 -- The row for horizontal timing pattern (1-based index)
+	for col = 1, size do
+		if col ~= 7 then -- Skip the finder pattern column
+			matrix[timing_row][col] = (col % 2 == 1) and 1 or 0 -- 1 for black, 0 for white
+		end
+	end
 
-	return code
+	local timing_col = 7 -- The column for vertical timing pattern (1-based index)
+	for row = 1, size do
+		if row ~= 7 then -- Skip the finder pattern row
+			matrix[row][timing_col] = (row % 2 == 1) and 1 or 0 -- 1 for black, 0 for white
+		end
+	end
+
+	-- Finder patterns
+	shaped.merge(matrix, common.finderPattern(), 0, 0) -- Top Right
+	shaped.merge(matrix, common.finderPattern(), size - 7, 0) -- Top Left
+	shaped.merge(matrix, common.finderPattern(), 0, size - 7) -- Bottom Right
+
+	-- Alignment patterns
+	for _, pair in ipairs(constants.alignment_coords[ver]) do
+		print(`({pair.row}, {pair.col})`)
+		shaped.merge(matrix, common.alignmentPattern(), pair.row - 2, pair.col - 2)
+	end
+
+	return matrix
 end
 
-function generateCodewords(analyzed: {analyze.analysisResult}, ver: number, micro: boolean?, ecc: 'L' | 'M' | 'Q' | 'H')
+print('Alignment Patterns')
+for v = 1, 40 do
+	local cpairs = constants.alignment_coords[v]
+
+	local strpairs = {}
+	for _, pair in ipairs(cpairs) do
+		table.insert(strpairs, `({pair.row}, {pair.col})`)
+	end
+
+	print(`QR-{v}: [{#cpairs}] = \{{table.concat(strpairs, ', ')}}`)
+end
+
+function generateDataCodewords(analyzed: {analyze.analysisResult}, ver: number, micro: boolean?, ecc: 'L' | 'M' | 'Q' | 'H'): {number}
 	local _stream = {}
 	local length = 0
 
@@ -45,9 +80,6 @@ function generateCodewords(analyzed: {analyze.analysisResult}, ver: number, micr
 		local processed =  modes[analysis.mode].process(analysis.read, ver, micro)
 		table.insert(_stream, processed)
 	end
-
-	print(table.concat(_stream, '\n'))
-	print(length, #table.concat(_stream))
 
 	local bitCapacity = constants.data_capacity(ver, micro)[ecc].bits
 	local terminatorLength = constants.mode_indicators.terminator[if micro then `M{ver}` else "QR"] -- 4 for QR-3
@@ -101,35 +133,62 @@ function generateCodewords(analyzed: {analyze.analysisResult}, ver: number, micr
 	local bitstream = table.concat(_stream)
 
 	for i = 1, #bitstream, 8 do
-		table.insert(codewords, bitstream:sub(i, i+7))
+		local byte = ''
+		-- Versions M1 and M3's final codeword is 4 bits, not 8
+		if #bitstream - i == 7 and micro and (ver == 1 or ver == 3) then 
+			byte = bitstream:sub(i, i+3)
+		else
+			byte = bitstream:sub(i, i + 7)
+		end
+
+		table.insert(codewords, tonumber(byte, 2) :: number)
 	end
 
-	-- Versions M1 and M3's final codeword is 4 bits, not 8
-	if micro and (ver == 1 or ver == 3) then
-		local max = #codewords
-		codewords[max] = codewords[max]:sub(1, 4)
-	end
 
 	print(`Length: {#bitstream}`)
 	print(`Codewords: {#codewords}`)
+
+	return codewords
+end
+
+local function fillMatrix(matrix: { { number} }, codewords: {number})
+	
 end
 
 function QR.new(data: string, params: {ecc: 'L' | 'M' | 'Q' | 'H'})
 	local analyzed, ver, micro = analyze(data, params.ecc or 'L')
+	-- ver = 7
 
 	print()
 	print(`{if micro then 'M' else 'QR'}-{ver}{params.ecc}: {data}`)--Analysis for: {data}`)
 	-- print(common.serializeTable(analyzed))
 
-	generateCodewords(analyzed, ver, micro, params.ecc)
-	print('--')
+	local data_codewords = generateDataCodewords(analyzed, ver, micro, params.ecc)
+	local ecc_codewords = ecc(data_codewords, constants.total_capacity(ver, micro).capacity_codewords)
+	
+	print()
+	print(`{#ecc_codewords} ECC Codewords:`)
+	print(`[{table.concat(ecc_codewords, ', ')}]`)
 
-	return setmetatable({ pattern = createBaseQR(1, false) }, {
+	print(`{#data_codewords} Data Codewords:`)
+	print(`[{table.concat(data_codewords, ", ")}]`)
+
+	local codeword_sequence = {}
+	table.move(data_codewords, 1, #data_codewords, 1, codeword_sequence)
+	table.move(ecc_codewords, 1, #ecc_codewords, #codeword_sequence + 1, codeword_sequence)
+
+	print(`{#codeword_sequence} Total codewords:`)
+	print(`[{table.concat(codeword_sequence, ", ")}]`)
+
+	local matrix = createBaseQR(ver)
+	-- matrix[1][1] = 0
+
+	return setmetatable({ pattern = matrix }, {
 		__tostring = function(self)
 			local out = { "" }
 
-			for _, row in ipairs(self.pattern) do
-				local full = table.concat(row, " "):gsub("1", "■"):gsub("0", ".")
+			for i, row in ipairs(self.pattern) do
+				local full = `{if i < 10 then `{i} ` else i} {table.concat(row, " "):gsub("1", "■"):gsub("0", ".")}`
 				table.insert(out, full)
 			end
 
@@ -141,9 +200,10 @@ end
 local bb = "https://vscode.dev/tunnel/ubuntu/home/master/development/qrcode"
 -- QR.new(bb, {ver = 4, micro = false})
 
-QR.new('1', {ecc = 'L'})
-QR.new("1A", { ecc = "M" })
-QR.new("a", { ecc = "Q" })
-QR.new(bb, { ecc = "H" })
+-- QR.new('1', {ecc = 'L'})
+-- QR.new("1A", { ecc = "M" })
+-- QR.new("a", { ecc = "Q" })
+-- QR.new(bb, { ecc = "H" })
 
+print(QR.new('https://www.qrcode.com/', {ecc = 'M'}))
 return QR
