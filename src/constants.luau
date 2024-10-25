@@ -1,3 +1,5 @@
+local common = require('./common')
+
 local char_indicator_bits = {
 	MICRO = {
 		[1] = { numeric = 3 },
@@ -292,6 +294,75 @@ for subver, all in pairs(data_capacities) do
 	end
 end
 
+-- Do block here so we don't have stuff in the global namespace
+-- {[Version]: { (x,y), (x,y) } }
+local alignment_coords: { { { row: number, col: number } } } = {}
+do
+	-- https://stackoverflow.com/a/73349304
+	local function getAlignmentCoordinates(ver, coordinates): number
+		if ver <= 1 then
+			return 0
+		end
+
+		local intervals = math.floor(ver / 7) + 1 -- Number of gaps between alignment patterns
+		local distance = 4 * ver + 4 -- Distance between first and last alignment pattern
+		local step = math.round(distance / intervals) -- Round equal spacing to nearest integer
+		step = step + bit32.band(step, 1) -- Round step to next even number
+
+		coordinates[1] = 6 -- First coordinate is always 6 (can't be calculated with step)
+		for i = 2, intervals + 1 do
+			coordinates[i] = 6 + distance - step * (intervals - (i - 1)) -- Start right/bottom and go left/up by step*k
+		end
+
+		return intervals + 1
+	end
+
+	-- ChatGPT, was too lazy lol
+	local function isInFinderPattern(row: number, col: number, size: number): boolean
+		local finder_patterns = {
+			{ 0, 0 }, -- Top-left
+			{ 0, size - 7 }, -- Top-right
+			{ size - 7, 0 }, -- Bottom-left
+		}
+
+		for _, fp in ipairs(finder_patterns) do
+			local fx, fy = fp[1], fp[2]
+			if row >= fx and row < fx + 7 and col >= fy and col < fy + 7 then
+				return true -- Overlapping with finder pattern
+			end
+		end
+		return false -- No overlap
+	end
+
+
+	for v = 1, 40 do
+		local temp_cpairs = {}
+		local coords = {}
+
+		getAlignmentCoordinates(v, coords)
+
+		local size = common.getSize(v, false)
+
+		for _, row in ipairs(coords) do
+			for _, col in ipairs(coords) do
+				-- Skip certain locations that should not have alignment patterns
+				if
+					(row == 6 and (col == 6 or col == size - 7))
+					or (row == size - 7 and col == 6)
+				then
+					continue
+				end
+
+				-- Check for intersection with finder patterns
+				if not isInFinderPattern(row, col, v) then
+					table.insert(temp_cpairs, { row = row, col = col })
+				end
+			end
+		end
+
+		alignment_coords[v] = temp_cpairs
+	end
+end
 -- Referenced from: Table 1 — Codeword capacity of all versions of QR code
 -- Note: Will probably be cleaned as the project continues, I don't know whats needed at the moment
 local total_capacities = {
@@ -672,4 +743,6 @@ return {
 
 	raw_total_capacity = total_capacities,
 	raw_data_capacity = data_capacities,
+
+	alignment_coords = alignment_coords,
 }
